@@ -20,9 +20,10 @@ async function convertWebmToOgg(base64Data) {
       const b64 = base64Data.split(",")[1];
       fs.writeFileSync(inputPath, Buffer.from(b64, "base64"));
 
-      const ffmpegPath = `"C:\\ProgramData\\chocolatey\\lib\\ffmpeg\\tools\\ffmpeg\\bin\\ffmpeg.exe"`;
+      
       // ffmpeg command for WEBM to OGG (opus)
-      const cmd = `${ffmpegPath} -y -i "${inputPath}" -c:a libopus -b:a 64k "${outputPath}"`;
+      const cmd = `ffmpeg -y -i "${inputPath}" -c:a libopus -b:a 64k "${outputPath}"`;
+
 
       exec(cmd, (err) => {
         if (err) return reject(err);
