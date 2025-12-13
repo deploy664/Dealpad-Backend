@@ -5,7 +5,7 @@ const axios = require("axios");
 const Conversation = require("../models/Conversation");
 const Message = require("../models/Message");
 const Agent = require("../models/Agent");
-const Customer = require("../models/Customer");   // ⭐ ADDED FIX ⭐
+const Customer = require("../models/Customer");
 
 /* ============================
       VERIFY WEBHOOK
@@ -28,40 +28,37 @@ router.get("/", (req, res) => {
 router.post("/", async (req, res) => {
   try {
     const body = req.body;
-
     const msg = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (!msg) return res.sendStatus(200);
 
     const from = msg.from;
     const msgType = msg.type;
 
-    console.log("🔥 Incoming WhatsApp Type:", msgType);
+    console.log("🔥 Incoming Type:", msgType);
 
-    /* ============================
-         FIND / CREATE CONVERSATION
-    ============================ */
+    /* ===========================================
+         ROUND-ROBIN AGENT ASSIGNMENT FIX
+    ============================================ */
     let convo = await Conversation.findOne({ customer_phone: from });
 
     if (!convo) {
       console.log("🆕 New customer:", from);
 
+      const allAgents = await Agent.find({ online: true }).sort({ _id: 1 });
+
       let assigned = null;
 
-      // 1) Prefer ONLINE agents
-      const onlineAgents = await Agent.find({ online: true }).sort({ _id: 1 });
-      if (onlineAgents.length > 0) {
-        assigned = onlineAgents[0]._id;
-      } else {
-        // 2) fallback to ANY agent
-        const allAgents = await Agent.find({}).sort({ _id: 1 });
-        if (allAgents.length > 0) {
-          assigned = allAgents[0]._id;
-        }
-      }
+      if (allAgents.length > 0) {
+        // READ last index
+        let lastIndex = global.lastAssignedIndex || 0;
 
-      // Safety fallback
-      if (!assigned) {
-        console.log("❌ No agents found, message stored unassigned");
+        // ASSIGN agent
+        assigned = allAgents[lastIndex % allAgents.length]._id;
+
+        // UPDATE index
+        global.lastAssignedIndex = (lastIndex + 1) % allAgents.length;
+
+        console.log("🎯 Assigned via round robin:", assigned);
       }
 
       convo = await Conversation.create({
@@ -69,9 +66,7 @@ router.post("/", async (req, res) => {
         assigned_agent: assigned
       });
 
-      /* ⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐
-          ADDED FIX: SAVE CUSTOMER
-      ⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐⭐ */
+      /* Save customer */
       let exists = await Customer.findOne({ number: from });
       if (!exists) {
         await Customer.create({
@@ -80,11 +75,10 @@ router.post("/", async (req, res) => {
         });
         console.log("📌 Customer saved:", from);
       }
-      /* ⭐ FIX END ⭐ */
     }
 
     /* =============================
-            PARSE MESSAGE CONTENT
+            PARSE MESSAGE
     ============================== */
     const content = {
       from,
@@ -97,12 +91,10 @@ router.post("/", async (req, res) => {
       audioData: null
     };
 
-    /* ---- TEXT ---- */
     if (msgType === "text") {
       content.message = msg.text.body;
     }
 
-    /* ---- IMAGE ---- */
     else if (msgType === "image") {
       const media = await downloadMedia(msg.image.id);
       content.fileData = media.base64;
@@ -110,7 +102,6 @@ router.post("/", async (req, res) => {
       content.fileType = media.mime;
     }
 
-    /* ---- DOCUMENT ---- */
     else if (msgType === "document") {
       const media = await downloadMedia(msg.document.id);
       content.fileData = media.base64;
@@ -118,7 +109,6 @@ router.post("/", async (req, res) => {
       content.fileType = msg.document.mime_type;
     }
 
-    /* ---- AUDIO / VOICE NOTE ---- */
     else if (msgType === "audio") {
       const media = await downloadMedia(msg.audio.id);
       content.voiceNote = true;
@@ -126,18 +116,14 @@ router.post("/", async (req, res) => {
       content.fileType = media.mime;
     }
 
-    /* =============================
-        SAVE MESSAGE INTO DATABASE
-    ============================== */
+    /* SAVE TO DB */
     await Message.create({
       conversation_id: convo._id,
       sender: "customer",
       ...content
     });
 
-    /* =============================
-        SEND MESSAGE TO AGENT (Socket)
-    ============================== */
+    /* SEND TO AGENT VIA SOCKET */
     const io = req.app.get("socketio");
     const agentId = convo.assigned_agent?.toString();
     const agentSocket = global.agentSockets[agentId];
@@ -147,9 +133,9 @@ router.post("/", async (req, res) => {
         ...content,
         from
       });
-      console.log("📨 Sent to agent:", agentId);
+      console.log("📨 Delivered to agent:", agentId);
     } else {
-      console.log("⚠ Agent offline, message saved only.");
+      console.log("⚠ Agent offline.");
     }
 
     res.sendStatus(200);
@@ -161,12 +147,11 @@ router.post("/", async (req, res) => {
 });
 
 /* ============================
-        MEDIA DOWNLOAD FUNCTION
+        MEDIA DOWNLOAD
 =============================== */
 async function downloadMedia(mediaId) {
   const token = process.env.WHATSAPP_TOKEN;
 
-  // STEP 1: GET MEDIA URL
   const meta = await axios.get(
     `https://graph.facebook.com/v20.0/${mediaId}`,
     { headers: { Authorization: `Bearer ${token}` } }
@@ -174,7 +159,6 @@ async function downloadMedia(mediaId) {
 
   const mediaUrl = meta.data.url;
 
-  // STEP 2: DOWNLOAD FILE BINARY
   const file = await axios.get(mediaUrl, {
     responseType: "arraybuffer",
     headers: { Authorization: `Bearer ${token}` }
