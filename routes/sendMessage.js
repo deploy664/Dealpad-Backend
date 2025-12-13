@@ -9,26 +9,26 @@ require("dotenv").config();
 const router = express.Router();
 
 /* ==========================================
-   FFMPEG: Convert WEBM → MP3 for WhatsApp
+   FFMPEG: Convert WEBM → OGG (Opus) for WhatsApp
 ========================================== */
-async function convertWebmToMp3(base64Data) {
+async function convertWebmToOgg(base64Data) {
   return new Promise((resolve, reject) => {
     try {
       const inputPath = path.join(__dirname, "voice_input.webm");
-      const outputPath = path.join(__dirname, "voice_output.mp3");
+      const outputPath = path.join(__dirname, "voice_output.ogg");
 
       const b64 = base64Data.split(",")[1];
       fs.writeFileSync(inputPath, Buffer.from(b64, "base64"));
 
       const ffmpegPath = `"C:\\ProgramData\\chocolatey\\lib\\ffmpeg\\tools\\ffmpeg\\bin\\ffmpeg.exe"`;
-      const cmd = `${ffmpegPath} -y -i "${inputPath}" -vn -ar 44100 -ac 2 -b:a 96k "${outputPath}"`;
+      // ffmpeg command for WEBM to OGG (opus)
+      const cmd = `${ffmpegPath} -y -i "${inputPath}" -c:a libopus -b:a 64k "${outputPath}"`;
 
       exec(cmd, (err) => {
         if (err) return reject(err);
 
-        const mp3Buffer = fs.readFileSync(outputPath);
-        const finalBase64 =
-          "data:audio/mpeg;base64," + mp3Buffer.toString("base64");
+        const oggBuffer = fs.readFileSync(outputPath);
+        const finalBase64 = "data:audio/ogg;base64," + oggBuffer.toString("base64");
 
         fs.unlinkSync(inputPath);
         fs.unlinkSync(outputPath);
@@ -71,7 +71,7 @@ router.post("/", async (req, res) => {
       payload.text = { body: message };
     }
 
-    /* ========== WEBM → MP3 Conversion ========== */
+    /* ========== WEBM → OGG Conversion ========== */
     if (
       voiceNote &&
       audioData &&
@@ -79,9 +79,9 @@ router.post("/", async (req, res) => {
       typeof fileType === "string" &&
       fileType.includes("webm")
     ) {
-      console.log("🎵 Converting WEBM → MP3...");
-      audioData = await convertWebmToMp3(audioData);
-      fileType = "audio/mpeg";
+      console.log("🎵 Converting WEBM → OGG...");
+      audioData = await convertWebmToOgg(audioData);
+      fileType = "audio/ogg";
     }
 
     /* ========== MEDIA UPLOAD ========== */
