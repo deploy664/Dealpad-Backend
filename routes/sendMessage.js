@@ -24,9 +24,10 @@ async function convertWebmToOgg(base64Data) {
 
   await new Promise((resolve, reject) => {
     exec(
-      `ffmpeg -y -i "${inputPath}" -c:a libopus -b:a 64k "${outputPath}"`,
-      err => (err ? reject(err) : resolve())
-    );
+  `ffmpeg -loglevel error -y -i "${inputPath}" -ac 1 -ar 48000 -c:a libopus -b:a 48k "${outputPath}"`,
+  err => (err ? reject(err) : resolve())
+);
+
   });
 
   const oggBuffer = await fs.readFile(outputPath);
