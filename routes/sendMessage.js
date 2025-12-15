@@ -1,53 +1,70 @@
+// routes/sendMessage.js (FINAL FAST VERSION)
+
 const express = require("express");
 const axios = require("axios");
 const FormData = require("form-data");
 const { exec } = require("child_process");
-const fs = require("fs");
+const fs = require("fs/promises");
 const path = require("path");
-require("dotenv").config();
+const crypto = require("crypto");
 
+require("dotenv").config();
 const router = express.Router();
 
-/* ==========================================
-   FFMPEG: Convert WEBM → OGG (Opus) for WhatsApp
-========================================== */
+/* ======================================================
+   🎵 BACKGROUND: WEBM → OGG (NON-BLOCKING)
+====================================================== */
 async function convertWebmToOgg(base64Data) {
-  return new Promise((resolve, reject) => {
-    try {
-      const inputPath = path.join(__dirname, "voice_input.webm");
-      const outputPath = path.join(__dirname, "voice_output.ogg");
+  const id = crypto.randomBytes(8).toString("hex");
+  const inputPath = path.join("/tmp", `voice_${id}.webm`);
+  const outputPath = path.join("/tmp", `voice_${id}.ogg`);
 
-      const b64 = base64Data.split(",")[1];
-      fs.writeFileSync(inputPath, Buffer.from(b64, "base64"));
+  const b64 = base64Data.split(",")[1];
+  await fs.writeFile(inputPath, Buffer.from(b64, "base64"));
 
-      
-      // ffmpeg command for WEBM to OGG (opus)
-      const cmd = `ffmpeg -y -i "${inputPath}" -c:a libopus -b:a 64k "${outputPath}"`;
-
-
-      exec(cmd, (err) => {
-        if (err) return reject(err);
-
-        const oggBuffer = fs.readFileSync(outputPath);
-        const finalBase64 = "data:audio/ogg;base64," + oggBuffer.toString("base64");
-
-        fs.unlinkSync(inputPath);
-        fs.unlinkSync(outputPath);
-
-        resolve(finalBase64);
-      });
-    } catch (e) {
-      reject(e);
-    }
+  await new Promise((resolve, reject) => {
+    exec(
+      `ffmpeg -y -i "${inputPath}" -c:a libopus -b:a 64k "${outputPath}"`,
+      err => (err ? reject(err) : resolve())
+    );
   });
+
+  const oggBuffer = await fs.readFile(outputPath);
+  await fs.unlink(inputPath).catch(() => {});
+  await fs.unlink(outputPath).catch(() => {});
+
+  return "data:audio/ogg;base64," + oggBuffer.toString("base64");
 }
 
-/* ==========================================
-         SEND MESSAGE TO WHATSAPP
-========================================== */
+/* ======================================================
+   📸 UPLOAD MEDIA → GET media_id
+====================================================== */
+async function uploadMedia(base64, mimeType) {
+  const [, b64] = base64.split(",");
+  const buffer = Buffer.from(b64, "base64");
+
+  const form = new FormData();
+  form.append("file", buffer, { filename: "media", contentType: mimeType });
+  form.append("messaging_product", "whatsapp");
+
+  const url = `https://graph.facebook.com/v20.0/${process.env.WHATSAPP_PHONE_ID}/media`;
+
+  const res = await axios.post(url, form, {
+    headers: {
+      ...form.getHeaders(),
+      Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`
+    }
+  });
+
+  return res.data.id;
+}
+
+/* ======================================================
+   🚀 SEND MESSAGE (FAST & NON-BLOCKING)
+====================================================== */
 router.post("/", async (req, res) => {
   try {
-    let {
+    const {
       to,
       message,
       fileData,
@@ -57,98 +74,78 @@ router.post("/", async (req, res) => {
       voiceNote
     } = req.body;
 
-    if (!to) return res.status(400).json({ error: "Missing recipient number" });
+    if (!to) return res.status(400).json({ error: "Missing recipient" });
 
-    const url = `https://graph.facebook.com/v20.0/${process.env.WHATSAPP_PHONE_ID}/messages`;
+    // ✅ INSTANT RESPONSE (NO WAITING)
+    res.json({ success: true });
 
-    let payload = {
-      messaging_product: "whatsapp",
-      to
-    };
+    // 🔁 BACKGROUND WORK
+    setImmediate(async () => {
+      try {
+        const url = `https://graph.facebook.com/v20.0/${process.env.WHATSAPP_PHONE_ID}/messages`;
 
-    /* ========== TEXT ONLY ========== */
-    if (message && !fileData && !audioData) {
-      payload.type = "text";
-      payload.text = { body: message };
-    }
+        let payload = {
+          messaging_product: "whatsapp",
+          to
+        };
 
-    /* ========== WEBM → OGG Conversion ========== */
-    if (
-      voiceNote &&
-      audioData &&
-      fileType &&
-      typeof fileType === "string" &&
-      fileType.includes("webm")
-    ) {
-      console.log("🎵 Converting WEBM → OGG...");
-      audioData = await convertWebmToOgg(audioData);
-      fileType = "audio/ogg";
-    }
+        /* TEXT */
+        if (message && !fileData && !audioData) {
+          payload.type = "text";
+          payload.text = { body: message };
+        }
 
-    /* ========== MEDIA UPLOAD ========== */
-    const mediaBase64 = fileData || audioData;
+        /* VOICE NOTE */
+        if (voiceNote && audioData) {
+          let finalAudio = audioData;
+          let finalType = fileType || "audio/ogg";
 
-    if (mediaBase64) {
-      const mediaId = await uploadMedia(
-        mediaBase64,
-        fileType || "application/octet-stream"
-      );
+          if (fileType && fileType.includes("webm")) {
+            finalAudio = await convertWebmToOgg(audioData);
+            finalType = "audio/ogg";
+          }
 
-      if (voiceNote) {
-        payload.type = "audio";
-        payload.audio = { id: mediaId };
-      } else if (fileType && fileType.startsWith("image")) {
-        payload.type = "image";
-        payload.image = { id: mediaId, caption: message || "" };
-      } else {
-        payload.type = "document";
-        payload.document = { id: mediaId, filename: fileName || "file" };
-      }
-    }
+          const mediaId = await uploadMedia(finalAudio, finalType);
+          payload.type = "audio";
+          payload.audio = { id: mediaId };
+        }
 
-    console.log("📤 Sending to WhatsApp:", payload);
+        /* IMAGE / FILE */
+        if (fileData && !voiceNote) {
+          const mediaId = await uploadMedia(
+            fileData,
+            fileType || "application/octet-stream"
+          );
 
-    const response = await axios.post(url, payload, {
-      headers: {
-        Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
-        "Content-Type": "application/json"
+          if (fileType?.startsWith("image")) {
+            payload.type = "image";
+            payload.image = { id: mediaId, caption: message || "" };
+          } else {
+            payload.type = "document";
+            payload.document = {
+              id: mediaId,
+              filename: fileName || "file"
+            };
+          }
+        }
+
+        await axios.post(url, payload, {
+          headers: {
+            Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+            "Content-Type": "application/json"
+          }
+        });
+
+        console.log("✅ WhatsApp sent:", to);
+      } catch (e) {
+        console.error("❌ Background send error:", e.response?.data || e.message);
       }
     });
 
-    console.log("✅ WhatsApp API Success:", response.data);
-    res.json({ success: true, data: response.data });
-
   } catch (err) {
-    console.error("❌ WhatsApp SEND ERROR:", err.response?.data || err);
-    res.status(500).json({ error: err.response?.data || err.message });
+    console.error("❌ Send route error:", err);
+    res.status(500).json({ error: "Internal error" });
   }
 });
-
-/* ==========================================
-       UPLOAD MEDIA → GET media_id
-========================================== */
-async function uploadMedia(base64, mimeType) {
-  const [, b64] = base64.split(",");
-  const buffer = Buffer.from(b64, "base64");
-
-  const form = new FormData();
-  form.append("file", buffer, {
-    filename: "media",
-    contentType: mimeType
-  });
-  form.append("messaging_product", "whatsapp");
-
-  const url = `https://graph.facebook.com/v20.0/${process.env.WHATSAPP_PHONE_ID}/media`;
-
-  const upload = await axios.post(url, form, {
-    headers: {
-      ...form.getHeaders(),
-      Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`
-    }
-  });
-
-  console.log("📸 Media uploaded:", upload.data);
-  return upload.data.id;
-}
 
 module.exports = router;
