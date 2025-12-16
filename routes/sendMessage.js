@@ -1,7 +1,9 @@
+// routes/sendMessage.js (FINAL FAST VERSION)
+
 const express = require("express");
 const axios = require("axios");
 const FormData = require("form-data");
-const { spawn } = require("child_process");
+const { exec } = require("child_process");
 const fs = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
@@ -9,72 +11,46 @@ const crypto = require("crypto");
 require("dotenv").config();
 const router = express.Router();
 
-const api = axios.create({ timeout: 8000 });
-
-let runningJobs = 0;
-const MAX_JOBS = 2;
-
-async function runJob(fn) {
-  while (runningJobs >= MAX_JOBS) {
-    await new Promise(r => setTimeout(r, 50));
-  }
-  runningJobs++;
-  try {
-    await fn();
-  } finally {
-    runningJobs--;
-  }
-}
-
-/* ======================
-   WEBM → OGG (VOICE SAFE)
-====================== */
+/* ======================================================
+   🎵 BACKGROUND: WEBM → OGG (NON-BLOCKING)
+====================================================== */
 async function convertWebmToOgg(base64Data) {
   const id = crypto.randomBytes(8).toString("hex");
-  const input = `/tmp/voice_${id}.webm`;
-  const output = `/tmp/voice_${id}.ogg`;
+  const inputPath = path.join("/tmp", `voice_${id}.webm`);
+  const outputPath = path.join("/tmp", `voice_${id}.ogg`);
 
-  await fs.writeFile(input, Buffer.from(base64Data.split(",")[1], "base64"));
+  const b64 = base64Data.split(",")[1];
+  await fs.writeFile(inputPath, Buffer.from(b64, "base64"));
 
-  await new Promise((res, rej) => {
-    const ffmpeg = spawn("ffmpeg", [
-      "-y",
-      "-i", input,
-      "-ac", "1",
-      "-ar", "16000",
-      "-c:a", "libopus",
-      output
-    ]);
-    ffmpeg.on("close", c => (c === 0 ? res() : rej()));
+  await new Promise((resolve, reject) => {
+    exec(
+  `ffmpeg -loglevel error -y -i "${inputPath}" -ac 1 -ar 48000 -c:a libopus -b:a 48k "${outputPath}"`,
+  err => (err ? reject(err) : resolve())
+);
+
   });
 
-  const ogg = await fs.readFile(output);
-  await fs.unlink(input).catch(() => {});
-  await fs.unlink(output).catch(() => {});
+  const oggBuffer = await fs.readFile(outputPath);
+  await fs.unlink(inputPath).catch(() => {});
+  await fs.unlink(outputPath).catch(() => {});
 
-  return {
-    base64: "data:audio/ogg;base64," + ogg.toString("base64"),
-    mime: "audio/ogg"
-  };
+  return "data:audio/ogg;base64," + oggBuffer.toString("base64");
 }
 
-/* ======================
-   UPLOAD MEDIA
-====================== */
+/* ======================================================
+   📸 UPLOAD MEDIA → GET media_id
+====================================================== */
 async function uploadMedia(base64, mimeType) {
-  const buffer = Buffer.from(base64.split(",")[1], "base64");
-  const ext = mimeType.split("/")[1] || "bin";
+  const [, b64] = base64.split(",");
+  const buffer = Buffer.from(b64, "base64");
 
   const form = new FormData();
-  form.append("file", buffer, {
-    filename: `media.${ext}`,
-    contentType: mimeType
-  });
+  form.append("file", buffer, { filename: "media", contentType: mimeType });
   form.append("messaging_product", "whatsapp");
 
   const url = `https://graph.facebook.com/v20.0/${process.env.WHATSAPP_PHONE_ID}/media`;
 
-  const res = await api.post(url, form, {
+  const res = await axios.post(url, form, {
     headers: {
       ...form.getHeaders(),
       Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`
@@ -84,9 +60,9 @@ async function uploadMedia(base64, mimeType) {
   return res.data.id;
 }
 
-/* ======================
-   SEND MESSAGE
-====================== */
+/* ======================================================
+   🚀 SEND MESSAGE (FAST & NON-BLOCKING)
+====================================================== */
 router.post("/", async (req, res) => {
   try {
     const {
@@ -101,10 +77,12 @@ router.post("/", async (req, res) => {
 
     if (!to) return res.status(400).json({ error: "Missing recipient" });
 
+    // ✅ INSTANT RESPONSE (NO WAITING)
     res.json({ success: true });
 
-    setImmediate(() => {
-      runJob(async () => {
+    // 🔁 BACKGROUND WORK
+    setImmediate(async () => {
+      try {
         const url = `https://graph.facebook.com/v20.0/${process.env.WHATSAPP_PHONE_ID}/messages`;
 
         let payload = {
@@ -120,21 +98,20 @@ router.post("/", async (req, res) => {
 
         /* VOICE NOTE */
         if (voiceNote && audioData) {
-          let audio = audioData;
-          let mime = fileType || "audio/ogg";
+          let finalAudio = audioData;
+          let finalType = fileType || "audio/ogg";
 
-          if (fileType?.includes("webm")) {
-            const conv = await convertWebmToOgg(audioData);
-            audio = conv.base64;
-            mime = conv.mime;
+          if (fileType && fileType.includes("webm")) {
+            finalAudio = await convertWebmToOgg(audioData);
+            finalType = "audio/ogg";
           }
 
-          const mediaId = await uploadMedia(audio, mime);
+          const mediaId = await uploadMedia(finalAudio, finalType);
           payload.type = "audio";
-          payload.audio = { id: mediaId, voice: true };
+          payload.audio = { id: mediaId };
         }
 
-        /* IMAGE / DOCUMENT */
+        /* IMAGE / FILE */
         if (fileData && !voiceNote) {
           const mediaId = await uploadMedia(
             fileData,
@@ -153,7 +130,7 @@ router.post("/", async (req, res) => {
           }
         }
 
-        await api.post(url, payload, {
+        await axios.post(url, payload, {
           headers: {
             Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
             "Content-Type": "application/json"
@@ -161,8 +138,11 @@ router.post("/", async (req, res) => {
         });
 
         console.log("✅ WhatsApp sent:", to);
-      });
+      } catch (e) {
+        console.error("❌ Background send error:", e.response?.data || e.message);
+      }
     });
+
   } catch (err) {
     console.error("❌ Send route error:", err);
     res.status(500).json({ error: "Internal error" });
