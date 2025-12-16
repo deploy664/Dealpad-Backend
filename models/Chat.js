@@ -1,7 +1,9 @@
 const mongoose = require("mongoose");
 
 const ChatSchema = new mongoose.Schema({
-  number: String,
+  customer: { type: String, required: true },          // customer phone
+  agent: { type: mongoose.Schema.Types.ObjectId, ref: "Agent" }, // agent reference
+
   sender: String,
   message: String,
 
@@ -10,9 +12,8 @@ const ChatSchema = new mongoose.Schema({
   fileType: String,
 
   voiceNote: Boolean,
-  audioData: String,
+  audioData: String
 
-  timestamp: { type: Date, default: Date.now }
-});
+}, { timestamps: true });  // automatically adds createdAt and updatedAt
 
 module.exports = mongoose.model("Chat", ChatSchema);
