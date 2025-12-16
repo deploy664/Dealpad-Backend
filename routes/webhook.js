@@ -7,9 +7,9 @@ const Message = require("../models/Message");
 const Agent = require("../models/Agent");
 const Customer = require("../models/Customer");
 
-/* =========================
-   VERIFY WEBHOOK
-========================= */
+/* ============================
+      VERIFY WEBHOOK
+=============================== */
 router.get("/", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -22,13 +22,13 @@ router.get("/", (req, res) => {
   res.sendStatus(403);
 });
 
-/* =========================
-   HANDLE INCOMING MESSAGE
-========================= */
+/* ===============================
+   HANDLE INCOMING WHATSAPP MSG
+================================= */
 router.post("/", async (req, res) => {
   try {
     const body = req.body;
-    const msg = body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    const msg = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
     if (!msg) return res.sendStatus(200);
 
     const from = msg.from;
@@ -36,18 +36,26 @@ router.post("/", async (req, res) => {
 
     console.log("🔥 Incoming Type:", msgType);
 
-    /* ===== ROUND ROBIN AGENT ASSIGN ===== */
+    /* ===========================================
+         ROUND-ROBIN AGENT ASSIGNMENT FIX
+    ============================================ */
     let convo = await Conversation.findOne({ customer_phone: from });
 
     if (!convo) {
       console.log("🆕 New customer:", from);
 
       const allAgents = await Agent.find({ online: true }).sort({ _id: 1 });
+
       let assigned = null;
 
       if (allAgents.length > 0) {
+        // READ last index
         let lastIndex = global.lastAssignedIndex || 0;
+
+        // ASSIGN agent
         assigned = allAgents[lastIndex % allAgents.length]._id;
+
+        // UPDATE index
         global.lastAssignedIndex = (lastIndex + 1) % allAgents.length;
 
         console.log("🎯 Assigned via round robin:", assigned);
@@ -58,17 +66,20 @@ router.post("/", async (req, res) => {
         assigned_agent: assigned
       });
 
+      /* Save customer */
       let exists = await Customer.findOne({ number: from });
       if (!exists) {
         await Customer.create({
           number: from,
-          assignedTo: assigned
+          assignedTo: assigned || null
         });
         console.log("📌 Customer saved:", from);
       }
     }
 
-    /* ===== PARSE MESSAGE ===== */
+    /* =============================
+            PARSE MESSAGE
+    ============================== */
     const content = {
       from,
       sender: "customer",
@@ -84,75 +95,73 @@ router.post("/", async (req, res) => {
       content.message = msg.text.body;
     }
 
-    if (msgType === "image") {
+    else if (msgType === "image") {
       const media = await downloadMedia(msg.image.id);
       content.fileData = media.base64;
       content.fileName = "image.jpg";
       content.fileType = media.mime;
     }
 
-    if (msgType === "document") {
+    else if (msgType === "document") {
       const media = await downloadMedia(msg.document.id);
       content.fileData = media.base64;
       content.fileName = msg.document.filename;
       content.fileType = msg.document.mime_type;
     }
 
-    if (msgType === "audio") {
+    else if (msgType === "audio") {
       const media = await downloadMedia(msg.audio.id);
       content.voiceNote = true;
       content.audioData = media.base64;
       content.fileType = media.mime;
     }
 
-    /* ===== SAVE MESSAGE ===== */
+    /* SAVE TO DB */
     await Message.create({
       conversation_id: convo._id,
       sender: "customer",
       ...content
     });
 
-    /* ===== SOCKET TO AGENT ===== */
+    /* SEND TO AGENT VIA SOCKET */
     const io = req.app.get("socketio");
     const agentId = convo.assigned_agent?.toString();
-    const agentSocket = global.agentSockets?.[agentId];
+    const agentSocket = global.agentSockets[agentId];
 
     if (agentSocket) {
-      io.to(agentSocket).emit("incoming_message", content);
+      io.to(agentSocket).emit("incoming_message", {
+        ...content,
+        from
+      });
       console.log("📨 Delivered to agent:", agentId);
     } else {
-      console.log("⚠ Agent offline");
+      console.log("⚠ Agent offline.");
     }
 
     res.sendStatus(200);
+
   } catch (err) {
     console.error("❌ Webhook Error:", err);
     res.sendStatus(500);
   }
 });
 
-/* =========================
-   MEDIA DOWNLOAD
-========================= */
+/* ============================
+        MEDIA DOWNLOAD
+=============================== */
 async function downloadMedia(mediaId) {
   const token = process.env.WHATSAPP_TOKEN;
 
   const meta = await axios.get(
     `https://graph.facebook.com/v20.0/${mediaId}`,
-    {
-      headers: {
-        Authorization: `Bearer ${token}`
-      }
-    }
+    { headers: { Authorization: `Bearer ${token}` } }
   );
 
   const mediaUrl = meta.data.url;
 
   const file = await axios.get(mediaUrl, {
     responseType: "arraybuffer",
-    headers: {
-      Authorization: `Bearer ${token}`
-    }
+    headers: { Authorization: `Bearer ${token}` }
   });
 
   const mime = file.headers["content-type"];
