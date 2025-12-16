@@ -1,8 +1,6 @@
 const express = require("express");
 const router = express.Router();
 const axios = require("axios");
-const fs = require("fs");
-const path = require("path");
 
 const Conversation = require("../models/Conversation");
 const Message = require("../models/Message");
@@ -10,7 +8,7 @@ const Agent = require("../models/Agent");
 const Customer = require("../models/Customer");
 
 /* =========================
-      VERIFY WEBHOOK
+   VERIFY WEBHOOK
 ========================= */
 router.get("/", (req, res) => {
   const mode = req.query["hub.mode"];
@@ -20,6 +18,7 @@ router.get("/", (req, res) => {
   if (mode === "subscribe" && token === process.env.VERIFY_TOKEN) {
     return res.status(200).send(challenge);
   }
+
   res.sendStatus(403);
 });
 
@@ -28,135 +27,139 @@ router.get("/", (req, res) => {
 ========================= */
 router.post("/", async (req, res) => {
   try {
-    const messages =
-      req.body.entry?.[0]?.changes?.[0]?.value?.messages || [];
+    const body = req.body;
+    const msg = body?.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    if (!msg) return res.sendStatus(200);
 
-    if (!messages.length) return res.sendStatus(200);
+    const from = msg.from;
+    const msgType = msg.type;
 
-    for (const msg of messages) {
-      const from = msg.from;
-      const type = msg.type;
+    console.log("🔥 Incoming Type:", msgType);
 
-      console.log("🔥 Incoming:", type);
+    /* ===== ROUND ROBIN AGENT ASSIGN ===== */
+    let convo = await Conversation.findOne({ customer_phone: from });
 
-      // 🔒 Prevent duplicate messages
-      const already = await Message.findOne({ whatsapp_msg_id: msg.id });
-      if (already) continue;
+    if (!convo) {
+      console.log("🆕 New customer:", from);
 
-      /* =========================
-         FIND / CREATE CONVO
-      ========================= */
-      let convo = await Conversation.findOne({ customer_phone: from });
+      const allAgents = await Agent.find({ online: true }).sort({ _id: 1 });
+      let assigned = null;
 
-      if (!convo) {
-        const agents = await Agent.find({ online: true }).sort({ _id: 1 });
-        let assigned = null;
+      if (allAgents.length > 0) {
+        let lastIndex = global.lastAssignedIndex || 0;
+        assigned = allAgents[lastIndex % allAgents.length]._id;
+        global.lastAssignedIndex = (lastIndex + 1) % allAgents.length;
 
-        if (agents.length) {
-          global.lastAssignedIndex = global.lastAssignedIndex || 0;
-          assigned =
-            agents[global.lastAssignedIndex % agents.length]._id;
-          global.lastAssignedIndex++;
-        }
+        console.log("🎯 Assigned via round robin:", assigned);
+      }
 
-        convo = await Conversation.create({
-          customer_phone: from,
-          assigned_agent: assigned
+      convo = await Conversation.create({
+        customer_phone: from,
+        assigned_agent: assigned
+      });
+
+      let exists = await Customer.findOne({ number: from });
+      if (!exists) {
+        await Customer.create({
+          number: from,
+          assignedTo: assigned
         });
-
-        await Customer.updateOne(
-          { number: from },
-          { $setOnInsert: { number: from, assignedTo: assigned } },
-          { upsert: true }
-        );
+        console.log("📌 Customer saved:", from);
       }
+    }
 
-      /* =========================
-         BUILD MESSAGE
-      ========================= */
-      const messageDoc = {
-        whatsapp_msg_id: msg.id,
-        conversation_id: convo._id,
-        sender: "customer",
-        message: null,
-        mediaType: null,
-        mediaUrl: null,
-        mimeType: null,
-        fileName: null
-      };
+    /* ===== PARSE MESSAGE ===== */
+    const content = {
+      from,
+      sender: "customer",
+      message: null,
+      fileData: null,
+      fileName: null,
+      fileType: null,
+      voiceNote: false,
+      audioData: null
+    };
 
-      if (type === "text") {
-        messageDoc.message = msg.text.body;
-      }
+    if (msgType === "text") {
+      content.message = msg.text.body;
+    }
 
-      /* =========================
-         MEDIA HANDLING
-      ========================= */
-      if (["image", "audio", "document"].includes(type)) {
-        const mediaId = msg[type].id;
-        const mimeType =
-          msg[type].mime_type ||
-          (type === "audio" ? "audio/ogg" : "image/jpeg");
+    if (msgType === "image") {
+      const media = await downloadMedia(msg.image.id);
+      content.fileData = media.base64;
+      content.fileName = "image.jpg";
+      content.fileType = media.mime;
+    }
 
-        // 1️⃣ Get media URL
-        const mediaMeta = await axios.get(
-          `https://graph.facebook.com/v18.0/${mediaId}`,
-          {
-            headers: {
-              Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`
-            }
-          }
-        );
+    if (msgType === "document") {
+      const media = await downloadMedia(msg.document.id);
+      content.fileData = media.base64;
+      content.fileName = msg.document.filename;
+      content.fileType = msg.document.mime_type;
+    }
 
-        // 2️⃣ Download media
-        const mediaFile = await axios.get(mediaMeta.data.url, {
-          headers: {
-            Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`
-          },
-          responseType: "arraybuffer"
-        });
+    if (msgType === "audio") {
+      const media = await downloadMedia(msg.audio.id);
+      content.voiceNote = true;
+      content.audioData = media.base64;
+      content.fileType = media.mime;
+    }
 
-        // 3️⃣ Save file
-        const ext = mimeType.split("/")[1] || "bin";
-        const fileName = `${Date.now()}-${mediaId}.${ext}`;
-        const filePath = path.join(__dirname, "../uploads", fileName);
+    /* ===== SAVE MESSAGE ===== */
+    await Message.create({
+      conversation_id: convo._id,
+      sender: "customer",
+      ...content
+    });
 
-        fs.writeFileSync(filePath, mediaFile.data);
+    /* ===== SOCKET TO AGENT ===== */
+    const io = req.app.get("socketio");
+    const agentId = convo.assigned_agent?.toString();
+    const agentSocket = global.agentSockets?.[agentId];
 
-        messageDoc.mediaType = type;
-        messageDoc.mimeType = mimeType;
-        messageDoc.mediaUrl = `/uploads/${fileName}`;
-        messageDoc.fileName = msg.document?.filename || fileName;
-      }
-
-      const savedMessage = await Message.create(messageDoc);
-
-      /* =========================
-         SOCKET → AGENT
-      ========================= */
-      const io = req.app.get("socketio");
-      const agentId = convo.assigned_agent?.toString();
-      const socketId = global.agentSockets?.[agentId];
-
-      if (socketId) {
-        io.to(socketId).emit("incoming_message", {
-          _id: savedMessage._id,
-          from,
-          sender: "customer",
-          message: savedMessage.message,
-          mediaType: savedMessage.mediaType,
-          mediaUrl: savedMessage.mediaUrl,
-          mimeType: savedMessage.mimeType,
-          createdAt: savedMessage.createdAt
-        });
-      }
+    if (agentSocket) {
+      io.to(agentSocket).emit("incoming_message", content);
+      console.log("📨 Delivered to agent:", agentId);
+    } else {
+      console.log("⚠ Agent offline");
     }
 
     res.sendStatus(200);
   } catch (err) {
-    console.error("❌ Webhook error:", err);
+    console.error("❌ Webhook Error:", err);
     res.sendStatus(500);
   }
 });
+
+/* =========================
+   MEDIA DOWNLOAD
+========================= */
+async function downloadMedia(mediaId) {
+  const token = process.env.WHATSAPP_TOKEN;
+
+  const meta = await axios.get(
+    `https://graph.facebook.com/v20.0/${mediaId}`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`
+      }
+    }
+  );
+
+  const mediaUrl = meta.data.url;
+
+  const file = await axios.get(mediaUrl, {
+    responseType: "arraybuffer",
+    headers: {
+      Authorization: `Bearer ${token}`
+    }
+  });
+
+  const mime = file.headers["content-type"];
+  const base64 =
+    "data:" + mime + ";base64," + Buffer.from(file.data).toString("base64");
+
+  return { base64, mime };
+}
 
 module.exports = router;
