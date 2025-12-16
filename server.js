@@ -1,4 +1,4 @@
-// server.js (FINAL - PRODUCTION SAFE)
+// server.js (FINAL - ADMIN PANEL FIXED)
 
 const express = require("express");
 const app = express();
@@ -21,9 +21,7 @@ app.use(cors());
 app.use(express.json({ limit: "30mb" }));
 
 /* SOCKET.IO SETUP */
-const io = new Server(server, {
-  cors: { origin: "*" }
-});
+const io = new Server(server, { cors: { origin: "*" } });
 app.set("socketio", io);
 
 /* Agent sockets map */
@@ -54,11 +52,11 @@ io.on("connection", socket => {
       socket.join("admins");
       console.log("👑 Admin connected:", adminId);
 
-      // Agents list
+      // Agents list (for caching dropdown)
       const agents = await Agent.find({}, "_id name online");
       socket.emit("agents_cache", agents);
 
-      // Agent stats
+      // Agent stats with active chats
       const agentStats = await Promise.all(
         agents.map(async a => ({
           _id: a._id,
@@ -67,11 +65,11 @@ io.on("connection", socket => {
           activeChats: await Chat.countDocuments({ agent: a._id })
         }))
       );
-
       socket.emit("agents_status", agentStats);
 
-      // Active chats
-      const chats = await Chat.find({}, "customer agent updatedAt");
+      // Active chats with populated agent name
+      const chats = await Chat.find({}, "customer agent updatedAt")
+        .populate("agent", "name");
       socket.emit("active_chats", chats);
 
     } catch (e) {
@@ -89,10 +87,12 @@ io.on("connection", socket => {
       await Chat.findOneAndUpdate(
         { customer },
         { agent: agentId, updatedAt: new Date() },
-        { upsert: true }
+        { upsert: true, new: true }
       );
 
-      const chats = await Chat.find({}, "customer agent updatedAt");
+      // Send updated chats to all admins
+      const chats = await Chat.find({}, "customer agent updatedAt")
+        .populate("agent", "name");
       io.to("admins").emit("active_chats", chats);
 
     } catch (e) {
@@ -125,17 +125,7 @@ io.on("connection", socket => {
   ============================ */
   socket.on("agent_message", async data => {
     try {
-      const {
-        to,
-        message,
-        fileData,
-        audioData,
-        fileType,
-        fileName,
-        voiceNote,
-        agentId
-      } = data;
-
+      const { to, message, fileData, audioData, fileType, fileName, voiceNote, agentId } = data;
       if (!to) return;
 
       let convo = await Conversation.findOne({ customer_phone: to });
@@ -146,6 +136,20 @@ io.on("connection", socket => {
         });
       }
 
+      // Save in Chat collection too (for admin panel)
+      await Chat.create({
+        customer: to,
+        agent: agentId || null,
+        sender: "agent",
+        message: message || "",
+        fileName: fileName || null,
+        fileData: fileData || null,
+        fileType: fileType || null,
+        voiceNote: !!voiceNote,
+        audioData: audioData || null
+      });
+
+      // Save in Message collection (for conversation history)
       await Message.create({
         conversation_id: convo._id,
         sender: "agent",
