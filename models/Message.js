@@ -10,35 +10,55 @@ const MessageSchema = new Schema(
       index: true
     },
 
+    // WhatsApp message id (ANTI DUPLICATE)
+    whatsapp_msg_id: {
+      type: String,
+      index: true,
+      unique: true,
+      sparse: true
+    },
+
     sender: {
       type: String,
       enum: ["customer", "agent"],
       required: true
     },
 
-    // 📝 TEXT
+    /* =====================
+       TEXT
+    ===================== */
     message: {
-      type: String
+      type: String,
+      default: null
     },
 
-    // 📎 MEDIA (NO BASE64)
-    mediaId: {
-      type: String
-    },
-
+    /* =====================
+       MEDIA
+    ===================== */
     mediaType: {
       type: String,
-      enum: ["image", "audio", "document"]
+      enum: ["image", "audio", "document"],
+      default: null
+    },
+
+    mediaUrl: {
+      type: String, // /uploads/file.ogg OR cloud URL
+      default: null
     },
 
     mimeType: {
-      type: String
+      type: String,
+      default: null
     },
 
     fileName: {
-      type: String
+      type: String,
+      default: null
     },
 
+    /* =====================
+       META
+    ===================== */
     createdAt: {
       type: Date,
       default: Date.now,
@@ -46,7 +66,8 @@ const MessageSchema = new Schema(
     }
   },
   {
-    minimize: true // 🔥 null fields save hi nahi hongi
+    minimize: true,
+    strict: true
   }
 );
 
