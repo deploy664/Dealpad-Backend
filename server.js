@@ -1,4 +1,5 @@
-// server.js (FINAL - ready to paste)
+// server.js (FINAL - PRODUCTION SAFE)
+
 const express = require("express");
 const app = express();
 const cors = require("cors");
@@ -6,11 +7,15 @@ const http = require("http");
 const server = http.createServer(app);
 const { Server } = require("socket.io");
 const mongoose = require("mongoose");
+
 require("dotenv").config();
 
 /* MODELS */
 const Message = require("./models/Message");
 const Conversation = require("./models/Conversation");
+const Admin = require("./models/Admin");
+const Agent = require("./models/Agent");
+const Chat = require("./models/Chat");
 
 app.use(cors());
 app.use(express.json({ limit: "30mb" }));
@@ -21,7 +26,7 @@ const io = new Server(server, {
 });
 app.set("socketio", io);
 
-/* Agent Sockets map */
+/* Agent sockets map */
 global.agentSockets = {};
 
 /* ======================================================
@@ -30,24 +35,84 @@ global.agentSockets = {};
 io.on("connection", socket => {
   console.log("🔌 Socket connected:", socket.id);
 
-  /* --- REGISTER AGENT --- */
+  /* ============================
+     🟢 REGISTER AGENT
+  ============================ */
   socket.on("register_agent", agentId => {
+    if (!agentId) return;
+    global.agentSockets[agentId] = socket.id;
+    console.log(`🟢 Agent registered: ${agentId}`);
+  });
+
+  /* ============================
+     👑 REGISTER ADMIN
+  ============================ */
+  socket.on("admin_register", async adminId => {
     try {
-      if (!agentId) return;
-      global.agentSockets[agentId] = socket.id;
-      console.log(`🟢 Agent registered: ${agentId} → socket: ${socket.id}`);
-    } catch (err) {
-      console.log("❌ register_agent error:", err);
+      if (!adminId) return;
+
+      socket.join("admins");
+      console.log("👑 Admin connected:", adminId);
+
+      // Agents list
+      const agents = await Agent.find({}, "_id name online");
+      socket.emit("agents_cache", agents);
+
+      // Agent stats
+      const agentStats = await Promise.all(
+        agents.map(async a => ({
+          _id: a._id,
+          name: a.name,
+          online: a.online,
+          activeChats: await Chat.countDocuments({ agent: a._id })
+        }))
+      );
+
+      socket.emit("agents_status", agentStats);
+
+      // Active chats
+      const chats = await Chat.find({}, "customer agent updatedAt");
+      socket.emit("active_chats", chats);
+
+    } catch (e) {
+      console.log("❌ admin_register error:", e);
     }
   });
 
-  /* --- LOAD CHAT HISTORY --- */
-  socket.on("load_messages", async (customerNumber) => {
+  /* ============================
+     🔁 TRANSFER CHAT
+  ============================ */
+  socket.on("transfer_chat", async ({ customer, agentId }) => {
+    try {
+      if (!customer || !agentId) return;
+
+      await Chat.findOneAndUpdate(
+        { customer },
+        { agent: agentId, updatedAt: new Date() },
+        { upsert: true }
+      );
+
+      const chats = await Chat.find({}, "customer agent updatedAt");
+      io.to("admins").emit("active_chats", chats);
+
+    } catch (e) {
+      console.log("❌ transfer_chat error:", e);
+    }
+  });
+
+  /* ============================
+     📜 LOAD CHAT HISTORY
+  ============================ */
+  socket.on("load_messages", async customerNumber => {
     try {
       if (!customerNumber) return socket.emit("chat_history", []);
       const convo = await Conversation.findOne({ customer_phone: customerNumber });
       if (!convo) return socket.emit("chat_history", []);
-      const messages = await Message.find({ conversation_id: convo._id }).sort({ createdAt: 1 });
+
+      const messages = await Message.find({
+        conversation_id: convo._id
+      }).sort({ createdAt: 1 });
+
       socket.emit("chat_history", messages);
     } catch (err) {
       console.log("❌ load_messages error:", err);
@@ -55,29 +120,25 @@ io.on("connection", socket => {
     }
   });
 
-  /* ======================================================
-     🟢 AGENT SEND MESSAGE → SAVE ONLY (NO BROADCAST)
-     IMPORTANT: frontend is responsible for calling /send to actually send to WhatsApp.
-     We DO NOT emit the agent's message back as an incoming_message to avoid duplicates.
-  ====================================================== */
-  socket.on("agent_message", async (data) => {
+  /* ============================
+     📨 AGENT MESSAGE (SAVE ONLY)
+  ============================ */
+  socket.on("agent_message", async data => {
     try {
-      const { 
-        to, 
-        message, 
-        fileData, 
-        audioData, 
-        fileType, 
-        fileName, 
-        voiceNote, 
-        agentId 
+      const {
+        to,
+        message,
+        fileData,
+        audioData,
+        fileType,
+        fileName,
+        voiceNote,
+        agentId
       } = data;
 
       if (!to) return;
 
-      /* Find or create conversation */
       let convo = await Conversation.findOne({ customer_phone: to });
-
       if (!convo) {
         convo = await Conversation.create({
           customer_phone: to,
@@ -85,7 +146,6 @@ io.on("connection", socket => {
         });
       }
 
-      /* SAVE message in DB */
       await Message.create({
         conversation_id: convo._id,
         sender: "agent",
@@ -97,43 +157,42 @@ io.on("connection", socket => {
         audioData: audioData || null
       });
 
-      /* NOTE: DO NOT emit incoming_message to this same agent socket.
-         Frontend already shows local echo. Emitting caused duplicate UI entries.
-         If you need server -> agent notifications in future, emit a separate event,
-         not `incoming_message`. */
-
     } catch (err) {
       console.log("❌ agent_message error:", err);
     }
   });
 
-  /* --- DISCONNECT --- */
+  /* ============================
+     🔴 DISCONNECT
+  ============================ */
   socket.on("disconnect", () => {
     for (let id in global.agentSockets) {
       if (global.agentSockets[id] === socket.id) {
         delete global.agentSockets[id];
       }
     }
+    socket.leave("admins");
     console.log("🔴 Socket disconnected:", socket.id);
   });
 });
 
 /* ROUTES */
-app.use("/webhook", require("./routes/webhook"));     // handles incoming WA -> server
-app.use("/send", require("./routes/sendMessage"));   // endpoint that sends to WhatsApp
-app.use("/agent", require("./routes/agentAuth"));    // agent login / customers
+app.use("/webhook", require("./routes/webhook"));
+app.use("/send", require("./routes/sendMessage"));
+app.use("/agent", require("./routes/agentAuth"));
+app.use("/admin", require("./routes/adminAuth"));
 
-/* ======================================================
+/* ============================
    🛢️ MONGO CONNECT
-====================================================== */
+============================ */
 mongoose
   .connect(process.env.MONGO_URI)
   .then(() => console.log("✅ MongoDB connected"))
   .catch(err => console.log("❌ MongoDB Error:", err));
 
-/* ======================================================
+/* ============================
    🚀 START SERVER
-====================================================== */
+============================ */
 server.listen(3000, () => {
   console.log("🚀 Server running on port 3000");
 });
