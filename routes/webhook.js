@@ -1,6 +1,8 @@
 const express = require("express");
 const router = express.Router();
 const axios = require("axios");
+const fs = require("fs");
+const path = require("path");
 
 const Conversation = require("../models/Conversation");
 const Message = require("../models/Message");
@@ -26,95 +28,128 @@ router.get("/", (req, res) => {
 ========================= */
 router.post("/", async (req, res) => {
   try {
-    const msg =
-      req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+    const messages =
+      req.body.entry?.[0]?.changes?.[0]?.value?.messages || [];
 
-    if (!msg) return res.sendStatus(200);
+    if (!messages.length) return res.sendStatus(200);
 
-    const from = msg.from;
-    const type = msg.type;
+    for (const msg of messages) {
+      const from = msg.from;
+      const type = msg.type;
 
-    console.log("🔥 Incoming:", type);
+      console.log("🔥 Incoming:", type);
 
-    /* =========================
-        FIND / CREATE CONVO
-    ========================= */
-    let convo = await Conversation.findOne({ customer_phone: from });
+      // 🔒 Prevent duplicate messages
+      const already = await Message.findOne({ whatsapp_msg_id: msg.id });
+      if (already) continue;
 
-    if (!convo) {
-      const agents = await Agent.find({ online: true }).sort({ _id: 1 });
-      let assigned = null;
+      /* =========================
+         FIND / CREATE CONVO
+      ========================= */
+      let convo = await Conversation.findOne({ customer_phone: from });
 
-      if (agents.length) {
-        global.lastAssignedIndex = global.lastAssignedIndex || 0;
-        assigned =
-          agents[global.lastAssignedIndex % agents.length]._id;
-        global.lastAssignedIndex++;
+      if (!convo) {
+        const agents = await Agent.find({ online: true }).sort({ _id: 1 });
+        let assigned = null;
+
+        if (agents.length) {
+          global.lastAssignedIndex = global.lastAssignedIndex || 0;
+          assigned =
+            agents[global.lastAssignedIndex % agents.length]._id;
+          global.lastAssignedIndex++;
+        }
+
+        convo = await Conversation.create({
+          customer_phone: from,
+          assigned_agent: assigned
+        });
+
+        await Customer.updateOne(
+          { number: from },
+          { $setOnInsert: { number: from, assignedTo: assigned } },
+          { upsert: true }
+        );
       }
 
-      convo = await Conversation.create({
-        customer_phone: from,
-        assigned_agent: assigned
-      });
+      /* =========================
+         BUILD MESSAGE
+      ========================= */
+      const messageDoc = {
+        whatsapp_msg_id: msg.id,
+        conversation_id: convo._id,
+        sender: "customer",
+        message: null,
+        mediaType: null,
+        mediaUrl: null,
+        mimeType: null,
+        fileName: null
+      };
 
-      await Customer.updateOne(
-        { number: from },
-        { $setOnInsert: { number: from, assignedTo: assigned } },
-        { upsert: true }
-      );
-    }
+      if (type === "text") {
+        messageDoc.message = msg.text.body;
+      }
 
-    /* =========================
-        BUILD MESSAGE (NO BASE64)
-    ========================= */
-    const messageDoc = {
-  conversation_id: convo._id,
-  sender: "customer",
-  message: null,
-  mediaId: null,
-  mediaType: null,
-  mimeType: null,
-  fileName: null
-};
+      /* =========================
+         MEDIA HANDLING
+      ========================= */
+      if (["image", "audio", "document"].includes(type)) {
+        const mediaId = msg[type].id;
+        const mimeType =
+          msg[type].mime_type ||
+          (type === "audio" ? "audio/ogg" : "image/jpeg");
 
+        // 1️⃣ Get media URL
+        const mediaMeta = await axios.get(
+          `https://graph.facebook.com/v18.0/${mediaId}`,
+          {
+            headers: {
+              Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`
+            }
+          }
+        );
 
-   if (type === "text") {
-  messageDoc.message = msg.text.body;
-}
+        // 2️⃣ Download media
+        const mediaFile = await axios.get(mediaMeta.data.url, {
+          headers: {
+            Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`
+          },
+          responseType: "arraybuffer"
+        });
 
-if (type === "image") {
-  messageDoc.mediaId = msg.image.id;
-  messageDoc.mediaType = "image";
-  messageDoc.mimeType = msg.image.mime_type || "image/jpeg";
-}
+        // 3️⃣ Save file
+        const ext = mimeType.split("/")[1] || "bin";
+        const fileName = `${Date.now()}-${mediaId}.${ext}`;
+        const filePath = path.join(__dirname, "../uploads", fileName);
 
-if (type === "document") {
-  messageDoc.mediaId = msg.document.id;
-  messageDoc.mediaType = "document";
-  messageDoc.mimeType = msg.document.mime_type;
-  messageDoc.fileName = msg.document.filename;
-}
+        fs.writeFileSync(filePath, mediaFile.data);
 
-if (type === "audio") {
-  messageDoc.mediaId = msg.audio.id;
-  messageDoc.mediaType = "audio";
-  messageDoc.mimeType = msg.audio.mime_type || "audio/ogg";
-}
+        messageDoc.mediaType = type;
+        messageDoc.mimeType = mimeType;
+        messageDoc.mediaUrl = `/uploads/${fileName}`;
+        messageDoc.fileName = msg.document?.filename || fileName;
+      }
 
-    await Message.create(messageDoc);
+      const savedMessage = await Message.create(messageDoc);
 
-    /* =========================
-        SOCKET → AGENT
-    ========================= */
-    const io = req.app.get("socketio");
-    const agentId = convo.assigned_agent?.toString();
-    const socketId = global.agentSockets[agentId];
+      /* =========================
+         SOCKET → AGENT
+      ========================= */
+      const io = req.app.get("socketio");
+      const agentId = convo.assigned_agent?.toString();
+      const socketId = global.agentSockets?.[agentId];
 
-    if (socketId) {
-      io.to(socketId).emit("incoming_message", {
-        from,
-        ...messageDoc
-      });
+      if (socketId) {
+        io.to(socketId).emit("incoming_message", {
+          _id: savedMessage._id,
+          from,
+          sender: "customer",
+          message: savedMessage.message,
+          mediaType: savedMessage.mediaType,
+          mediaUrl: savedMessage.mediaUrl,
+          mimeType: savedMessage.mimeType,
+          createdAt: savedMessage.createdAt
+        });
+      }
     }
 
     res.sendStatus(200);
