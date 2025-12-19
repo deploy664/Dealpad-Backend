@@ -69,6 +69,18 @@ router.post("/", async (req, res) => {
 
     if (msgType === "text") {
       content.message = msg.text.body;
+    } else if (msgType === "image") {
+      content.fileType = "image/jpeg";
+      content.fileData = msg.image?.mime_type && msg.image?.url ? msg.image.url : null;
+      content.fileName = msg.image?.filename || null;
+    } else if (msgType === "audio") {
+      content.voiceNote = true;
+      content.audioData = msg.audio?.url || null;
+      content.fileType = msg.audio?.mime_type || "audio/ogg";
+    } else if (msgType === "document") {
+      content.fileType = msg.document?.mime_type || null;
+      content.fileData = msg.document?.url || null;
+      content.fileName = msg.document?.filename || null;
     }
 
     await Message.create({
@@ -98,6 +110,11 @@ router.post("/", async (req, res) => {
       customer: from,
       sender: "customer",
       message: content.message || "[media]",
+      fileData: content.fileData || null,
+      fileType: content.fileType || null,
+      fileName: content.fileName || null,
+      voiceNote: content.voiceNote || false,
+      audioData: content.audioData || null,
       createdAt: new Date()
     });
 
