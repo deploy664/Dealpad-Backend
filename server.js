@@ -132,47 +132,110 @@ io.on("connection", socket => {
   /* ======================================================
      🟣 ADMIN MESSAGE
   ====================================================== */
-  socket.on("admin_message", async ({ to, message }) => {
-    try {
-      if (!to || !message) return;
+    socket.on("admin_message", async (data) => {
+      try {
+        const {
+          to,
+          message,
+          fileData,
+          audioData,
+          fileType,
+          fileName,
+          voiceNote
+        } = data;
 
-      const convo = await Conversation.findOne({ customer_phone: to });
-      if (!convo) return;
+        if (!to) return;
 
-      await Message.create({
-        conversation_id: convo._id,
-        sender: "admin",
-        message
-      });
+        let convo = await Conversation.findOne({ customer_phone: to });
+        if (!convo) return;
 
-      // ✅ FIX
-      await Conversation.findByIdAndUpdate(convo._id, {
-        updatedAt: new Date()
-      });
+        await Message.create({
+          conversation_id: convo._id,
+          sender: "admin",
+          message: message || "",
+          fileName: fileName || null,
+          fileData: fileData || null,
+          fileType: fileType || null,
+          voiceNote: !!voiceNote,
+          audioData: audioData || null
+        });
 
-      const sendWhatsApp = require("./routes/sendMessage");
-      if (sendWhatsApp.sendText) {
-        sendWhatsApp.sendText(to, message);
-      }
+        // ✅ FIX: update conversation timestamp
+        await Conversation.findByIdAndUpdate(convo._id, {
+          updatedAt: new Date()
+        });
 
-      if (
-        convo.assigned_agent &&
-        global.agentSockets[convo.assigned_agent]
-      ) {
-        io.to(global.agentSockets[convo.assigned_agent]).emit(
-          "incoming_message",
-          {
-            from: to,
-            message,
-            sender: "admin"
+        // Send to WhatsApp using the same logic as /send route
+        const axios = require("axios");
+        const { uploadMedia, convertWebmToOgg } = require("./routes/sendMessage");
+        const url = `https://graph.facebook.com/v20.0/${process.env.WHATSAPP_PHONE_ID}/messages`;
+        let payload = {
+          messaging_product: "whatsapp",
+          to
+        };
+
+        if (message && !fileData && !audioData) {
+          payload.type = "text";
+          payload.text = { body: message };
+        }
+        if (voiceNote && audioData) {
+          let finalAudio = audioData;
+          let finalType = fileType || "audio/ogg";
+          if (fileType && fileType.includes("webm")) {
+            finalAudio = await convertWebmToOgg(audioData);
+            finalType = "audio/ogg";
           }
-        );
-      }
+          const mediaId = await uploadMedia(finalAudio, finalType);
+          payload.type = "audio";
+          payload.audio = { id: mediaId };
+        }
+        if (fileData && !voiceNote) {
+          const mediaId = await uploadMedia(
+            fileData,
+            fileType || "application/octet-stream"
+          );
+          if (fileType?.startsWith("image")) {
+            payload.type = "image";
+            payload.image = { id: mediaId, caption: message || "" };
+          } else {
+            payload.type = "document";
+            payload.document = {
+              id: mediaId,
+              filename: fileName || "file"
+            };
+          }
+        }
+        await axios.post(url, payload, {
+          headers: {
+            Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+            "Content-Type": "application/json"
+          }
+        });
 
-    } catch (err) {
-      console.log("❌ admin_message error:", err);
-    }
-  });
+        // Notify assigned agent if online
+        if (
+          convo.assigned_agent &&
+          global.agentSockets[convo.assigned_agent]
+        ) {
+          io.to(global.agentSockets[convo.assigned_agent]).emit(
+            "incoming_message",
+            {
+              from: to,
+              message,
+              sender: "admin",
+              fileData,
+              audioData,
+              fileType,
+              fileName,
+              voiceNote
+            }
+          );
+        }
+
+      } catch (err) {
+        console.log("❌ admin_message error:", err);
+      }
+    });
 
   socket.on("disconnect", () => {
     for (let id in global.agentSockets) {
