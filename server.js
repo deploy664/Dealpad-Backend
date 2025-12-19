@@ -187,6 +187,7 @@ io.on("connection", socket => {
 app.use("/webhook", require("./routes/webhook"));
 app.use("/send", require("./routes/sendMessage"));
 app.use("/agent", require("./routes/agentAuth"));
+app.use("/admin", require("./routes/adminAuth"));
 
 mongoose
   .connect(process.env.MONGO_URI)
