@@ -50,8 +50,16 @@ io.on("connection", socket => {
     try {
       const chats = await Conversation.find()
         .sort({ updatedAt: -1 })
+        .populate("assigned_agent", "username")
         .lean();
-      socket.emit("admin_all_chats", chats);
+
+      const mapped = chats.map(c => ({
+        customer: c.customer_phone,
+        agent: c.assigned_agent ? c.assigned_agent.username : null,
+        raw: c
+      }));
+
+      socket.emit("admin_all_chats", mapped);
     } catch (err) {
       console.log("❌ admin_get_all_chats error:", err);
       socket.emit("admin_all_chats", []);
@@ -188,6 +196,7 @@ app.use("/webhook", require("./routes/webhook"));
 app.use("/send", require("./routes/sendMessage"));
 app.use("/agent", require("./routes/agentAuth"));
 app.use("/admin", require("./routes/adminAuth"));
+app.use("/admin/api", require("./routes/admin")(io));
 
 mongoose
   .connect(process.env.MONGO_URI)
