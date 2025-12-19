@@ -255,11 +255,13 @@ io.on("connection", socket => {
 });
 
 /* ROUTES */
+
 app.use("/webhook", require("./routes/webhook"));
 app.use("/send", require("./routes/sendMessage"));
 app.use("/agent", require("./routes/agentAuth"));
 app.use("/admin", require("./routes/adminAuth"));
 app.use("/admin/api", require("./routes/admin")(io));
+app.use("/media-proxy", require("./routes/mediaProxy"));
 
 mongoose
   .connect(process.env.MONGO_URI)
