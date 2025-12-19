@@ -1,4 +1,3 @@
-// server.js (FINAL - ready to paste)
 const express = require("express");
 const app = express();
 const cors = require("cors");
@@ -21,8 +20,9 @@ const io = new Server(server, {
 });
 app.set("socketio", io);
 
-/* Agent Sockets map */
+/* SOCKET MAPS */
 global.agentSockets = {};
+global.adminSockets = {};
 
 /* ======================================================
    🔌 SOCKET CONNECTION
@@ -30,24 +30,43 @@ global.agentSockets = {};
 io.on("connection", socket => {
   console.log("🔌 Socket connected:", socket.id);
 
-  /* --- REGISTER AGENT --- */
+  /* ---------- REGISTER AGENT ---------- */
   socket.on("register_agent", agentId => {
+    if (!agentId) return;
+    global.agentSockets[agentId] = socket.id;
+    console.log(`🟢 Agent registered: ${agentId}`);
+  });
+
+  /* ---------- REGISTER ADMIN ---------- */
+  socket.on("admin_register", adminId => {
+    if (!adminId) return;
+    global.adminSockets[adminId] = socket.id;
+    socket.join("admins");
+    console.log(`🟣 Admin registered: ${adminId}`);
+  });
+
+  /* ---------- ADMIN: GET ALL CHATS ---------- */
+  socket.on("admin_get_all_chats", async () => {
     try {
-      if (!agentId) return;
-      global.agentSockets[agentId] = socket.id;
-      console.log(`🟢 Agent registered: ${agentId} → socket: ${socket.id}`);
+      const chats = await Conversation.find()
+        .sort({ updatedAt: -1 })
+        .lean();
+      socket.emit("admin_all_chats", chats);
     } catch (err) {
-      console.log("❌ register_agent error:", err);
+      console.log("❌ admin_get_all_chats error:", err);
+      socket.emit("admin_all_chats", []);
     }
   });
 
-  /* --- LOAD CHAT HISTORY --- */
-  socket.on("load_messages", async (customerNumber) => {
+  /* ---------- LOAD CHAT HISTORY ---------- */
+  socket.on("load_messages", async customerNumber => {
     try {
       if (!customerNumber) return socket.emit("chat_history", []);
       const convo = await Conversation.findOne({ customer_phone: customerNumber });
       if (!convo) return socket.emit("chat_history", []);
-      const messages = await Message.find({ conversation_id: convo._id }).sort({ createdAt: 1 });
+      const messages = await Message.find({
+        conversation_id: convo._id
+      }).sort({ createdAt: 1 });
       socket.emit("chat_history", messages);
     } catch (err) {
       console.log("❌ load_messages error:", err);
@@ -56,28 +75,24 @@ io.on("connection", socket => {
   });
 
   /* ======================================================
-     🟢 AGENT SEND MESSAGE → SAVE ONLY (NO BROADCAST)
-     IMPORTANT: frontend is responsible for calling /send to actually send to WhatsApp.
-     We DO NOT emit the agent's message back as an incoming_message to avoid duplicates.
+     🟢 AGENT MESSAGE
   ====================================================== */
-  socket.on("agent_message", async (data) => {
+  socket.on("agent_message", async data => {
     try {
-      const { 
-        to, 
-        message, 
-        fileData, 
-        audioData, 
-        fileType, 
-        fileName, 
-        voiceNote, 
-        agentId 
+      const {
+        to,
+        message,
+        fileData,
+        audioData,
+        fileType,
+        fileName,
+        voiceNote,
+        agentId
       } = data;
 
       if (!to) return;
 
-      /* Find or create conversation */
       let convo = await Conversation.findOne({ customer_phone: to });
-
       if (!convo) {
         convo = await Conversation.create({
           customer_phone: to,
@@ -85,7 +100,6 @@ io.on("connection", socket => {
         });
       }
 
-      /* SAVE message in DB */
       await Message.create({
         conversation_id: convo._id,
         sender: "agent",
@@ -97,43 +111,88 @@ io.on("connection", socket => {
         audioData: audioData || null
       });
 
-      /* NOTE: DO NOT emit incoming_message to this same agent socket.
-         Frontend already shows local echo. Emitting caused duplicate UI entries.
-         If you need server -> agent notifications in future, emit a separate event,
-         not `incoming_message`. */
+      // ✅ FIX: update conversation timestamp
+      await Conversation.findByIdAndUpdate(convo._id, {
+        updatedAt: new Date()
+      });
 
     } catch (err) {
       console.log("❌ agent_message error:", err);
     }
   });
 
-  /* --- DISCONNECT --- */
+  /* ======================================================
+     🟣 ADMIN MESSAGE
+  ====================================================== */
+  socket.on("admin_message", async ({ to, message }) => {
+    try {
+      if (!to || !message) return;
+
+      const convo = await Conversation.findOne({ customer_phone: to });
+      if (!convo) return;
+
+      await Message.create({
+        conversation_id: convo._id,
+        sender: "admin",
+        message
+      });
+
+      // ✅ FIX
+      await Conversation.findByIdAndUpdate(convo._id, {
+        updatedAt: new Date()
+      });
+
+      const sendWhatsApp = require("./routes/sendMessage");
+      if (sendWhatsApp.sendText) {
+        sendWhatsApp.sendText(to, message);
+      }
+
+      if (
+        convo.assigned_agent &&
+        global.agentSockets[convo.assigned_agent]
+      ) {
+        io.to(global.agentSockets[convo.assigned_agent]).emit(
+          "incoming_message",
+          {
+            from: to,
+            message,
+            sender: "admin"
+          }
+        );
+      }
+
+    } catch (err) {
+      console.log("❌ admin_message error:", err);
+    }
+  });
+
   socket.on("disconnect", () => {
     for (let id in global.agentSockets) {
       if (global.agentSockets[id] === socket.id) {
         delete global.agentSockets[id];
       }
     }
+
+    for (let id in global.adminSockets) {
+      if (global.adminSockets[id] === socket.id) {
+        delete global.adminSockets[id];
+      }
+    }
+
     console.log("🔴 Socket disconnected:", socket.id);
   });
 });
 
 /* ROUTES */
-app.use("/webhook", require("./routes/webhook"));     // handles incoming WA -> server
-app.use("/send", require("./routes/sendMessage"));   // endpoint that sends to WhatsApp
-app.use("/agent", require("./routes/agentAuth"));    // agent login / customers
+app.use("/webhook", require("./routes/webhook"));
+app.use("/send", require("./routes/sendMessage"));
+app.use("/agent", require("./routes/agentAuth"));
 
-/* ======================================================
-   🛢️ MONGO CONNECT
-====================================================== */
 mongoose
   .connect(process.env.MONGO_URI)
   .then(() => console.log("✅ MongoDB connected"))
   .catch(err => console.log("❌ MongoDB Error:", err));
 
-/* ======================================================
-   🚀 START SERVER
-====================================================== */
 server.listen(3000, () => {
   console.log("🚀 Server running on port 3000");
 });
