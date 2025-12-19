@@ -1,22 +1,25 @@
 const express = require("express");
 const router = express.Router();
+const Admin = require("../models/Admin");
 
 /* ============================
-      SIMPLE ADMIN LOGIN
-   - Uses env vars `ADMIN_USERNAME` / `ADMIN_PASSWORD`
-   - Falls back to `admin` / `admin123` when not set
+      ADMIN LOGIN (DB-backed)
+   - Checks `admins` collection for username/password
+   - Returns `adminId` as the admin's username
 =============================== */
-router.post("/login", (req, res) => {
-  const { username, password } = req.body || {};
+router.post("/login", async (req, res) => {
+  try {
+    const { username, password } = req.body || {};
+    if (!username || !password) return res.status(400).send({ error: "username and password required" });
 
-  const ADMIN_USER = process.env.ADMIN_USERNAME || "admin";
-  const ADMIN_PASS = process.env.ADMIN_PASSWORD || "admin123";
+    const admin = await Admin.findOne({ username, password });
+    if (!admin) return res.status(401).send({ error: "Invalid credentials" });
 
-  if (username === ADMIN_USER && password === ADMIN_PASS) {
-    return res.send({ success: true, adminId: ADMIN_USER });
+    return res.send({ success: true, adminId: admin.username, name: admin.name || null });
+  } catch (err) {
+    console.log("❌ adminAuth error:", err);
+    return res.status(500).send({ error: "Server error" });
   }
-
-  return res.status(401).send({ error: "Invalid credentials" });
 });
 
 module.exports = router;
