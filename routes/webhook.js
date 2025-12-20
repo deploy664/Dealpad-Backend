@@ -1,5 +1,12 @@
 const express = require("express");
 const router = express.Router();
+const axios = require('axios');
+
+async function urlToBase64(url, mimeType = 'application/octet-stream') {
+  const response = await axios.get(url, { responseType: 'arraybuffer' });
+  const base64 = Buffer.from(response.data, 'binary').toString('base64');
+  return `data:${mimeType};base64,${base64}`;
+}
 const axios = require("axios");
 
 const Conversation = require("../models/Conversation");
@@ -69,18 +76,18 @@ router.post("/", async (req, res) => {
 
     if (msgType === "text") {
       content.message = msg.text.body;
-    } else if (msgType === "image") {
-      content.fileType = "image/jpeg";
-      content.fileData = msg.image?.mime_type && msg.image?.url ? msg.image.url : null;
-      content.fileName = msg.image?.filename || null;
-    } else if (msgType === "audio") {
+    } else if (msgType === "image" && msg.image?.url) {
+      content.fileType = msg.image.mime_type || "image/jpeg";
+      content.fileData = await urlToBase64(msg.image.url, content.fileType);
+      content.fileName = msg.image.filename || "image.jpg";
+    } else if (msgType === "audio" && msg.audio?.url) {
       content.voiceNote = true;
-      content.audioData = msg.audio?.url || null;
-      content.fileType = msg.audio?.mime_type || "audio/ogg";
-    } else if (msgType === "document") {
-      content.fileType = msg.document?.mime_type || null;
-      content.fileData = msg.document?.url || null;
-      content.fileName = msg.document?.filename || null;
+      content.fileType = msg.audio.mime_type || "audio/ogg";
+      content.audioData = await urlToBase64(msg.audio.url, content.fileType);
+    } else if (msgType === "document" && msg.document?.url) {
+      content.fileType = msg.document.mime_type;
+      content.fileData = await urlToBase64(msg.document.url, content.fileType);
+      content.fileName = msg.document.filename;
     }
 
     await Message.create({
