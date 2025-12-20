@@ -1,13 +1,11 @@
 const express = require("express");
 const router = express.Router();
-const axios = require('axios');
 
 async function urlToBase64(url, mimeType = 'application/octet-stream') {
   const response = await axios.get(url, { responseType: 'arraybuffer' });
   const base64 = Buffer.from(response.data, 'binary').toString('base64');
   return `data:${mimeType};base64,${base64}`;
 }
-const axios = require("axios");
 
 const Conversation = require("../models/Conversation");
 const Message = require("../models/Message");
