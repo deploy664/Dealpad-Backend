@@ -3,9 +3,19 @@ const router = express.Router();
 const axios = require('axios');
 
 async function urlToBase64(url, mimeType = 'application/octet-stream') {
-  const response = await axios.get(url, { responseType: 'arraybuffer' });
-  const base64 = Buffer.from(response.data, 'binary').toString('base64');
-  return `data:${mimeType};base64,${base64}`;
+  try {
+    const response = await axios.get(url, {
+      responseType: 'arraybuffer',
+      headers: {
+        Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`
+      }
+    });
+    const base64 = Buffer.from(response.data, 'binary').toString('base64');
+    return `data:${mimeType};base64,${base64}`;
+  } catch (err) {
+    console.error('Failed to fetch media from WhatsApp:', url, err.response?.status, err.response?.data);
+    return null;
+  }
 }
 const Conversation = require("../models/Conversation");
 const Message = require("../models/Message");
