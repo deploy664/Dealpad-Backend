@@ -1,22 +1,5 @@
 const express = require("express");
 const router = express.Router();
-const axios = require('axios');
-
-async function urlToBase64(url, mimeType = 'application/octet-stream') {
-  try {
-    const response = await axios.get(url, {
-      responseType: 'arraybuffer',
-      headers: {
-        Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`
-      }
-    });
-    const base64 = Buffer.from(response.data, 'binary').toString('base64');
-    return `data:${mimeType};base64,${base64}`;
-  } catch (err) {
-    console.error('Failed to fetch media from WhatsApp:', url, err.response?.status, err.response?.data);
-    return null;
-  }
-}
 const Conversation = require("../models/Conversation");
 const Message = require("../models/Message");
 const Agent = require("../models/Agent");
@@ -88,22 +71,22 @@ router.post("/", async (req, res) => {
       content.message = msg.text.body;
     }
 
-    else if (msgType === "image" && msg.image?.link) {
+    else if (msgType === "image") {
+      content.fileData = msg.image.link;
       content.fileType = "image/jpeg";
-      content.fileData = await urlToBase64(msg.image.link, content.fileType);
       content.fileName = "image.jpg";
     }
 
-    else if (msgType === "document" && msg.document?.link) {
+    else if (msgType === "document") {
+      content.fileData = msg.document.link;
       content.fileType = msg.document.mime_type;
-      content.fileData = await urlToBase64(msg.document.link, content.fileType);
       content.fileName = msg.document.filename;
     }
 
-    else if (msgType === "audio" && msg.audio?.link) {
+    else if (msgType === "audio") {
       content.voiceNote = true;
+      content.audioData = msg.audio.link;
       content.fileType = "audio/ogg";
-      content.audioData = await urlToBase64(msg.audio.link, content.fileType);
     }
 
     /* ========== SAVE MESSAGE ========= */

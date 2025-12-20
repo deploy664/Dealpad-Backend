@@ -1,3 +1,5 @@
+// routes/sendMessage.js (FINAL FAST VERSION)
+
 const express = require("express");
 const axios = require("axios");
 const FormData = require("form-data");
@@ -22,9 +24,10 @@ async function convertWebmToOgg(base64Data) {
 
   await new Promise((resolve, reject) => {
     exec(
-      `ffmpeg -loglevel error -y -i "${inputPath}" -ac 1 -ar 48000 -c:a libopus -b:a 48k "${outputPath}"`,
-      err => (err ? reject(err) : resolve())
-    );
+  `ffmpeg -loglevel error -y -i "${inputPath}" -ac 1 -ar 48000 -c:a libopus -b:a 48k "${outputPath}"`,
+  err => (err ? reject(err) : resolve())
+);
+
   });
 
   const oggBuffer = await fs.readFile(outputPath);
@@ -74,7 +77,7 @@ router.post("/", async (req, res) => {
 
     if (!to) return res.status(400).json({ error: "Missing recipient" });
 
-    // ✅ INSTANT RESPONSE
+    // ✅ INSTANT RESPONSE (NO WAITING)
     res.json({ success: true });
 
     // 🔁 BACKGROUND WORK
@@ -135,26 +138,8 @@ router.post("/", async (req, res) => {
         });
 
         console.log("✅ WhatsApp sent:", to);
-
-        /* ==================================================
-           🟣 NOTIFY ADMINS (AGENT → CUSTOMER MESSAGE)
-           ✅ FIXED PAYLOAD
-        ================================================== */
-        const io = req.app.get("socketio");
-        if (io) {
-          io.to("admins").emit("new_message", {
-            customer: to,
-            sender: "agent",
-            message: message || null,
-            createdAt: new Date()
-          });
-        }
-
       } catch (e) {
-        console.error(
-          "❌ Background send error:",
-          e.response?.data || e.message
-        );
+        console.error("❌ Background send error:", e.response?.data || e.message);
       }
     });
 
