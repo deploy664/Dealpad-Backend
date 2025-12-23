@@ -20,6 +20,18 @@ const ConversationSchema = new Schema({
     default: 'open'
   },
 
+  unreadCount: {
+    type: Number,
+    default: 0
+  },
+
+  // Optional: Track who has unread messages (e.g., 'agent' or 'customer')
+  unreadFor: {
+    type: String,
+    enum: ['agent', 'customer', null],
+    default: null
+  },
+
   created_at: {
     type: Date,
     default: Date.now

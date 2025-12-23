@@ -1,4 +1,4 @@
-// routes/sendMessage.js (FINAL FAST VERSION)
+require("dotenv").config();
 
 const express = require("express");
 const axios = require("axios");
@@ -7,8 +7,8 @@ const { exec } = require("child_process");
 const fs = require("fs/promises");
 const path = require("path");
 const crypto = require("crypto");
+const Conversation = require("../models/Conversation"); // Import Conversation model
 
-require("dotenv").config();
 const router = express.Router();
 
 /* ======================================================
@@ -24,10 +24,9 @@ async function convertWebmToOgg(base64Data) {
 
   await new Promise((resolve, reject) => {
     exec(
-  `ffmpeg -loglevel error -y -i "${inputPath}" -ac 1 -ar 48000 -c:a libopus -b:a 48k "${outputPath}"`,
-  err => (err ? reject(err) : resolve())
-);
-
+      `ffmpeg -loglevel error -y -i "${inputPath}" -ac 1 -ar 48000 -c:a libopus -b:a 48k "${outputPath}"`,
+      err => (err ? reject(err) : resolve())
+    );
   });
 
   const oggBuffer = await fs.readFile(outputPath);
@@ -61,7 +60,7 @@ async function uploadMedia(base64, mimeType) {
 }
 
 /* ======================================================
-   🚀 SEND MESSAGE (FAST & NON-BLOCKING)
+   🚀 SEND MESSAGE (WITH UNREAD UPDATE)
 ====================================================== */
 router.post("/", async (req, res) => {
   try {
@@ -72,17 +71,36 @@ router.post("/", async (req, res) => {
       audioData,
       fileType,
       fileName,
-      voiceNote
+      voiceNote,
+      senderType // "agent" or "customer" - frontend se zaroor bhejna
     } = req.body;
 
     if (!to) return res.status(400).json({ error: "Missing recipient" });
 
-    // ✅ INSTANT RESPONSE (NO WAITING)
+    // Instant response
     res.json({ success: true });
 
-    // 🔁 BACKGROUND WORK
+    // Background async process
     setImmediate(async () => {
       try {
+        // 1. Update unread count in Conversation
+        let conversation = await Conversation.findOne({ customer_phone: to });
+
+        if (!conversation) {
+          conversation = new Conversation({ customer_phone: to });
+        }
+
+        if (senderType === "customer") {
+          conversation.unreadCount = (conversation.unreadCount || 0) + 1;
+          conversation.unreadFor = "agent";
+        } else if (senderType === "agent") {
+          conversation.unreadCount = 0;
+          conversation.unreadFor = null;
+        }
+
+        await conversation.save();
+
+        // 2. Prepare WhatsApp payload
         const url = `https://graph.facebook.com/v20.0/${process.env.WHATSAPP_PHONE_ID}/messages`;
 
         let payload = {
@@ -90,13 +108,11 @@ router.post("/", async (req, res) => {
           to
         };
 
-        /* TEXT */
         if (message && !fileData && !audioData) {
           payload.type = "text";
           payload.text = { body: message };
         }
 
-        /* VOICE NOTE */
         if (voiceNote && audioData) {
           let finalAudio = audioData;
           let finalType = fileType || "audio/ogg";
@@ -111,7 +127,6 @@ router.post("/", async (req, res) => {
           payload.audio = { id: mediaId };
         }
 
-        /* IMAGE / FILE */
         if (fileData && !voiceNote) {
           const mediaId = await uploadMedia(
             fileData,
@@ -142,7 +157,6 @@ router.post("/", async (req, res) => {
         console.error("❌ Background send error:", e.response?.data || e.message);
       }
     });
-
   } catch (err) {
     console.error("❌ Send route error:", err);
     res.status(500).json({ error: "Internal error" });
