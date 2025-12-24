@@ -11,6 +11,8 @@ require("dotenv").config();
 /* MODELS */
 const Message = require("./models/Message");
 const Conversation = require("./models/Conversation");
+const Agent = require("./models/Agent");
+
 
 app.use(cors());
 app.use(express.json({ limit: "30mb" }));
@@ -31,15 +33,25 @@ io.on("connection", socket => {
   console.log("🔌 Socket connected:", socket.id);
 
   /* --- REGISTER AGENT --- */
-  socket.on("register_agent", agentId => {
-    try {
-      if (!agentId) return;
-      global.agentSockets[agentId] = socket.id;
-      console.log(`🟢 Agent registered: ${agentId} → socket: ${socket.id}`);
-    } catch (err) {
-      console.log("❌ register_agent error:", err);
-    }
-  });
+socket.on("register_agent", async (agentId) => {
+  try {
+    if (!agentId) return;
+
+    socket.agentId = agentId; // IMPORTANT
+
+    global.agentSockets[agentId] = socket.id;
+
+    await Agent.findByIdAndUpdate(agentId, {
+      online: true,
+      lastSeen: new Date()
+    });
+
+    console.log(`🟢 Agent ONLINE: ${agentId}`);
+  } catch (err) {
+    console.log("❌ register_agent error:", err);
+  }
+});
+
 
   /* --- LOAD CHAT HISTORY --- */
   socket.on("load_messages", async (customerNumber) => {
@@ -108,14 +120,25 @@ io.on("connection", socket => {
   });
 
   /* --- DISCONNECT --- */
-  socket.on("disconnect", () => {
-    for (let id in global.agentSockets) {
-      if (global.agentSockets[id] === socket.id) {
-        delete global.agentSockets[id];
-      }
+  socket.on("disconnect", async () => {
+  try {
+    const agentId = socket.agentId;
+
+    if (agentId) {
+      delete global.agentSockets[agentId];
+
+      await Agent.findByIdAndUpdate(agentId, {
+        online: false,
+        lastSeen: new Date()
+      });
+
+      console.log(`🔴 Agent OFFLINE: ${agentId}`);
     }
-    console.log("🔴 Socket disconnected:", socket.id);
-  });
+
+  } catch (err) {
+    console.log("❌ disconnect error:", err);
+  }
+});
 });
 
 /* ROUTES */
