@@ -126,17 +126,27 @@ router.post("/", async (req, res) => {
     /* SEND TO AGENT VIA SOCKET */
     const io = req.app.get("socketio");
     const agentId = convo.assigned_agent?.toString();
-    const agentSocket = global.agentSockets[agentId];
+    let agent = null;
 
-    if (agentSocket) {
-      io.to(agentSocket).emit("incoming_message", {
-        ...content,
-        from
-      });
-      console.log("📨 Delivered to agent:", agentId);
-    } else {
-      console.log("⚠ Agent offline.");
-    }
+if (agentId) {
+  agent = await Agent.findById(agentId);
+}
+
+if (!agent || !agent.online) {
+  console.log("⚠ Agent offline (DB)");
+} else {
+  const agentSocket = global.agentSockets[agentId];
+
+  if (agentSocket) {
+    io.to(agentSocket).emit("incoming_message", {
+      ...content,
+      from
+    });
+    console.log("📨 Delivered to agent:", agentId);
+  } else {
+    console.log("ℹ Agent online but socket not on this instance");
+  }
+}
 
     res.sendStatus(200);
 
