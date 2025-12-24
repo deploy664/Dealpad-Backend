@@ -37,8 +37,13 @@ socket.on("register_agent", async (agentId) => {
   try {
     if (!agentId) return;
 
-    socket.agentId = agentId; // IMPORTANT
+    // ❗ KILL old socket if exists
+    const oldSocketId = global.agentSockets[agentId];
+    if (oldSocketId && oldSocketId !== socket.id) {
+      io.sockets.sockets.get(oldSocketId)?.disconnect(true);
+    }
 
+    socket.agentId = agentId;
     global.agentSockets[agentId] = socket.id;
 
     await Agent.findByIdAndUpdate(agentId, {
@@ -51,6 +56,7 @@ socket.on("register_agent", async (agentId) => {
     console.log("❌ register_agent error:", err);
   }
 });
+
 
 
   /* --- LOAD CHAT HISTORY --- */
